@@ -2,16 +2,18 @@ package com.example.mcp.tool.development;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter;
+import com.example.mcp.security.SecurityContext;
+import com.example.mcp.tool.BaseMcpTool;
+// import org.slf4j.Logger; // Logger inherited from BaseMcpTool
+// import org.slf4j.LoggerFactory; // LoggerFactory inherited from BaseMcpTool
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+// import java.nio.file.Paths; // Path creation will be through validatePath or Paths.get as needed
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,9 +22,13 @@ import java.util.concurrent.TimeUnit;
 /**
  * Git Operations Tool - Common git commands for development workflow
  */
-public class GitOperationsTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(GitOperationsTool.class);
+public class GitOperationsTool extends BaseMcpTool {
+    // private static final Logger logger = LoggerFactory.getLogger(GitOperationsTool.class); // Logger inherited
     private static final int DEFAULT_TIMEOUT = 60; // seconds
+
+    public GitOperationsTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+    }
 
     @Override
     public String getName() {
@@ -86,27 +92,68 @@ public class GitOperationsTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String repositoryPathStr = getOptionalString(arguments, "repository_path", ".");
+        Path repoPath = validatePath(repositoryPathStr); // From BaseMcpTool
+
+        if (!Files.isDirectory(repoPath)) { // Check if it's a directory first
+            throw new ToolExecutionException("Repository path is not a directory: " + repoPath);
+        }
+        if (!Files.exists(repoPath.resolve(".git"))) { // Then check if it's a Git repo
+            throw new ToolExecutionException("Path is not a git repository: " + repoPath);
+        }
+
+        // Validate the main 'git' command itself once
+        validateCommand("git");
+
+        // Specific validations based on operation
+        String operation = getRequiredString(arguments, "operation");
+        switch (operation) {
+            case "add":
+                List<String> files = getOptionalStringList(arguments, "files", List.of());
+                if (files.isEmpty()) {
+                    throw new ToolExecutionException("Files parameter is required for 'add' operation.");
+                }
+                break;
+            case "commit":
+                String message = getOptionalString(arguments, "message", null);
+                if (message == null || message.trim().isEmpty()) {
+                    throw new ToolExecutionException("Message parameter is required for 'commit' operation.");
+                }
+                break;
+            case "checkout":
+                String branchName = getOptionalString(arguments, "branch_name", null);
+                if (branchName == null || branchName.trim().isEmpty()) {
+                    throw new ToolExecutionException("Branch name is required for 'checkout' operation.");
+                }
+                break;
+            // Add other operation-specific validations if they are simple and declarative.
+            // More complex validation logic can remain within executeInternal or be handled by the git command itself.
+        }
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // As it executes external git commands
+        return resourceLimiter.acquireProcessOperation();
+    }
+
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
             String operation = getRequiredString(arguments, "operation");
-            String repositoryPath = getOptionalString(arguments, "repository_path", ".");
-            @SuppressWarnings("unchecked")
-            List<String> files = (List<String>) arguments.getOrDefault("files", List.of());
+            String repositoryPathStr = getOptionalString(arguments, "repository_path", ".");
+            // Path validated in validateInputs, re-retrieve for use here
+            Path repoPath = validatePath(repositoryPathStr);
+
+            List<String> files = getOptionalStringList(arguments, "files", List.of());
             String message = getOptionalString(arguments, "message", null);
             String branchName = getOptionalString(arguments, "branch_name", null);
             int limit = getOptionalInt(arguments, "limit", 10);
             String remote = getOptionalString(arguments, "remote", "origin");
             boolean force = getOptionalBoolean(arguments, "force", false);
 
-            // Validate repository path
-            Path repoPath = Paths.get(repositoryPath);
-            if (!Files.exists(repoPath)) {
-                throw new ToolExecutionException("Repository path does not exist: " + repositoryPath);
-            }
-
-            if (!isGitRepository(repoPath)) {
-                throw new ToolExecutionException("Path is not a git repository: " + repositoryPath);
-            }
+            // isGitRepository and other path checks are done in validateInputs
 
             // Execute git operation
             GitResult result = executeGitOperation(operation, repoPath, files, message,
@@ -115,25 +162,30 @@ public class GitOperationsTool implements McpTool {
             // Format response
             String response = formatGitResult(operation, result);
 
-            logger.debug("Git operation completed: {} in {}", operation, repositoryPath);
-            return createTextResult(response);
+            logger.debug("Git operation completed: {} in {}", operation, repoPath);
+            return super.createTextResult(response); // Use BaseMcpTool's createTextResult
 
-        } catch (Exception e) {
-            logger.error("Error executing git operation", e);
+        } catch (IOException | InterruptedException e) { // Catch specific exceptions from executeGitOperation
+            logger.error("Error executing git operation: {} on path {}", operation, getOptionalString(arguments, "repository_path", "."), e);
             throw new ToolExecutionException("Git operation failed: " + e.getMessage(), e);
+        } catch (ToolExecutionException e) { // Rethrow ToolExecutionExceptions
+            throw e;
+        } catch (Exception e) { // Catch any other unexpected exceptions
+            logger.error("Unexpected error during git operation", e);
+            throw new ToolExecutionException("Unexpected error during git operation: " + e.getMessage(), e);
         }
     }
 
-    private boolean isGitRepository(Path path) {
-        return Files.exists(path.resolve(".git"));
-    }
+    // isGitRepository check is now part of validateInputs.
 
     private GitResult executeGitOperation(String operation, Path repoPath, List<String> files,
                                           String message, String branchName, int limit,
                                           String remote, boolean force) throws IOException, InterruptedException, ToolExecutionException {
+        // Validations for required parameters (files for add, message for commit, branchName for checkout)
+        // are now handled in validateInputs.
 
         List<String> command = new ArrayList<>();
-        command.add("git");
+        command.add("git"); // 'git' command itself validated in validateInputs
 
         switch (operation) {
             case "status" -> {
@@ -153,64 +205,63 @@ public class GitOperationsTool implements McpTool {
                 command.add("diff");
                 if (!files.isEmpty()) {
                     command.add("--");
-                    command.addAll(files);
+                    command.addAll(files); // File paths are data here
                 }
             }
             case "add" -> {
                 command.add("add");
-                if (files.isEmpty()) {
-                    throw new ToolExecutionException("Files parameter required for add operation");
-                }
-                command.addAll(files);
+                // files emptiness already checked in validateInputs
+                command.addAll(files); // File paths are data here
             }
             case "commit" -> {
-                if (message == null || message.trim().isEmpty()) {
-                    throw new ToolExecutionException("Message parameter required for commit operation");
-                }
+                // message null/empty check already in validateInputs
                 command.add("commit");
                 command.add("-m");
-                command.add(message);
+                command.add(message); // Commit message is data
             }
             case "branch" -> {
                 command.add("branch");
-                if (branchName != null) {
-                    command.add(branchName);
+                if (branchName != null && !branchName.trim().isEmpty()) { // Check not empty, null already handled by getOptional
+                    command.add(branchName); // Branch name is data
                 }
             }
             case "checkout" -> {
-                if (branchName == null) {
-                    throw new ToolExecutionException("Branch name required for checkout operation");
-                }
+                // branchName null/empty check already in validateInputs
                 command.add("checkout");
-                command.add(branchName);
+                command.add(branchName); // Branch name is data
             }
             case "pull" -> {
                 command.add("pull");
-                command.add(remote);
+                command.add(remote); // Remote name is data
             }
             case "push" -> {
                 command.add("push");
-                command.add(remote);
+                command.add(remote); // Remote name is data
                 if (force) {
-                    command.add("--force");
+                    command.add("--force"); // Option
                 }
             }
             case "stash" -> {
                 command.add("stash");
-                if (message != null) {
-                    command.add("push");
-                    command.add("-m");
-                    command.add(message);
+                if (message != null && !message.trim().isEmpty()) { // Check not empty for message
+                    command.add("push"); // Stash sub-command
+                    command.add("-m");   // Option
+                    command.add(message); // Stash message is data
                 }
             }
-            default -> throw new ToolExecutionException("Unknown git operation: " + operation);
+            default -> throw new ToolExecutionException("Unknown git operation: " + operation); // Should ideally not be reached if enum in schema is exhaustive
         }
 
         return executeGitCommand(command, repoPath);
     }
 
     private GitResult executeGitCommand(List<String> command, Path workingDirectory)
-            throws IOException, InterruptedException {
+            throws IOException, InterruptedException, ToolExecutionException { // Added ToolExecutionException for command validation
+        
+        // The 'git' command itself is validated in validateInputs.
+        // Here we could add finer-grained validation for arguments if necessary,
+        // but for git, subcommands and options are numerous.
+        // For now, we rely on validateCommand("git") for the base command.
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.directory(workingDirectory.toFile());
@@ -230,7 +281,7 @@ public class GitOperationsTool implements McpTool {
         boolean finished = process.waitFor(DEFAULT_TIMEOUT, TimeUnit.SECONDS);
         if (!finished) {
             process.destroyForcibly();
-            throw new IOException("Git command timed out after " + DEFAULT_TIMEOUT + " seconds");
+            throw new IOException("Git command timed out after " + DEFAULT_TIMEOUT + " seconds: " + String.join(" ", command) );
         }
 
         long endTime = System.currentTimeMillis();
@@ -313,7 +364,7 @@ public class GitOperationsTool implements McpTool {
         String[] lines = output.split("\n");
 
         for (String line : lines) {
-            if (line.contains("*")) {
+            if (line.contains("*")) { // Simple heuristic, could be improved
                 formatted.append("📝 ").append(line).append("\n");
             } else {
                 formatted.append(line).append("\n");
@@ -359,45 +410,8 @@ public class GitOperationsTool implements McpTool {
         return formatted.toString();
     }
 
-    private String getRequiredString(Map<String, Object> arguments, String key) throws ToolExecutionException {
-        Object value = arguments.get(key);
-        if (value == null || String.valueOf(value).trim().isEmpty()) {
-            throw new ToolExecutionException("Missing required parameter: " + key);
-        }
-        return String.valueOf(value).trim();
-    }
-
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value).trim() : defaultValue;
-    }
-
-    private int getOptionalInt(Map<String, Object> arguments, String key, int defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Number) return ((Number) value).intValue();
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private boolean getOptionalBoolean(Map<String, Object> arguments, String key, boolean defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Boolean) return (Boolean) value;
-        return Boolean.parseBoolean(String.valueOf(value));
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods getRequiredString, getOptionalString, getOptionalInt, getOptionalBoolean, createTextResult
+    // are inherited from BaseMcpTool.
 
     /**
      * Result of git command execution

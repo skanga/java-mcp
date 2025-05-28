@@ -2,14 +2,16 @@ package com.example.mcp.tool.development;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+// import java.nio.file.Paths; // Will use validatePath or Paths.get as needed
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -18,8 +20,8 @@ import java.util.stream.Collectors;
 /**
  * Code Critique Tool - Provides comprehensive code quality analysis and improvement suggestions
  */
-public class CodeCritiqueTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(CodeCritiqueTool.class);
+public class CodeCritiqueTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(CodeCritiqueTool.class); // Logger inherited
 
     // Language-specific patterns and rules
     private static final Map<String, CodeAnalyzer> ANALYZERS = Map.of(
@@ -32,6 +34,11 @@ public class CodeCritiqueTool implements McpTool {
     );
 
     private static final int MAX_FILE_SIZE = 1024 * 1024; // 1MB
+
+    // Constructor added
+    public CodeCritiqueTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+    }
 
     @Override
     public String getName() {
@@ -88,108 +95,178 @@ public class CodeCritiqueTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String action = getOptionalString(arguments, "action", "analyze_file");
+        List<String> validActions = List.of("analyze_file", "analyze_code", "compare_files", "suggest_improvements");
+        if (!validActions.contains(action)) {
+            throw new ToolExecutionException("Invalid action: " + action + ". Must be one of " + validActions);
+        }
+
+        String filePathStr = getOptionalString(arguments, "file_path", null);
+        String code = getOptionalString(arguments, "code", null);
+        String filePath2Str = getOptionalString(arguments, "file_path_2", null);
+
+        switch (action) {
+            case "analyze_file":
+                if (filePathStr == null || filePathStr.trim().isEmpty()) {
+                    throw new ToolExecutionException("File path is required for 'analyze_file' action.");
+                }
+                Path path = validatePath(filePathStr); // Validates existence and security
+                 if (!Files.isRegularFile(path)) { // Check after validatePath
+                    throw new ToolExecutionException("Path is not a regular file: " + path);
+                }
+                // File size check will be done before reading in analyzeFile method
+                break;
+            case "analyze_code":
+                if (code == null || code.trim().isEmpty()) {
+                    throw new ToolExecutionException("Code content is required for 'analyze_code' action.");
+                }
+                if (code.length() > MAX_FILE_SIZE) { // MAX_FILE_SIZE is a constant in the class
+                    throw new ToolExecutionException("Code too large for analysis (max 1MB).");
+                }
+                break;
+            case "compare_files":
+                if (filePathStr == null || filePathStr.trim().isEmpty() || filePath2Str == null || filePath2Str.trim().isEmpty()) {
+                    throw new ToolExecutionException("Both file_path and file_path_2 are required for 'compare_files' action.");
+                }
+                Path path1 = validatePath(filePathStr);
+                Path path2 = validatePath(filePath2Str);
+                 if (!Files.isRegularFile(path1)) {
+                    throw new ToolExecutionException("file_path is not a regular file: " + path1);
+                }
+                if (!Files.isRegularFile(path2)) {
+                    throw new ToolExecutionException("file_path_2 is not a regular file: " + path2);
+                }
+                // File size checks will be done before reading
+                break;
+            case "suggest_improvements":
+                if ((filePathStr == null || filePathStr.trim().isEmpty()) && (code == null || code.trim().isEmpty())) {
+                    throw new ToolExecutionException("Either file_path or code must be provided for 'suggest_improvements' action.");
+                }
+                if (filePathStr != null && !filePathStr.trim().isEmpty()) {
+                    Path suggestionPath = validatePath(filePathStr);
+                     if (!Files.isRegularFile(suggestionPath)) {
+                        throw new ToolExecutionException("Path is not a regular file: " + suggestionPath);
+                    }
+                }
+                if (code != null && !code.trim().isEmpty() && code.length() > MAX_FILE_SIZE) {
+                    throw new ToolExecutionException("Code too large for analysis (max 1MB).");
+                }
+                break;
+        }
+
+        String language = getOptionalString(arguments, "language", "auto");
+        List<String> validLanguages = List.of("java", "javascript", "typescript", "python", "clojure", "go", "auto");
+        if (!validLanguages.contains(language)) {
+            throw new ToolExecutionException("Invalid language: " + language + ". Must be one of " + validLanguages);
+        }
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // This tool primarily reads files and performs CPU-bound analysis.
+        return resourceLimiter.acquireFileOperation("code_analysis");
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String action = getOptionalString(arguments, "action", "analyze_file");
-            String filePath = getOptionalString(arguments, "file_path", null);
+            String action = getOptionalString(arguments, "action", "analyze_file"); // Use inherited getOptionalString
+            String filePathStr = getOptionalString(arguments, "file_path", null);
             String code = getOptionalString(arguments, "code", null);
             String language = getOptionalString(arguments, "language", "auto");
             String analysisLevel = getOptionalString(arguments, "analysis_level", "standard");
-            @SuppressWarnings("unchecked")
-            List<String> focusAreas = (List<String>) arguments.getOrDefault("focus_areas", List.of("all"));
-            String filePath2 = getOptionalString(arguments, "file_path_2", null);
+            List<String> focusAreas = getOptionalStringList(arguments, "focus_areas", List.of("all")); // Use getOptionalStringList
+            String filePath2Str = getOptionalString(arguments, "file_path_2", null);
 
             String result = switch (action) {
-                case "analyze_file" -> analyzeFile(filePath, language, analysisLevel, focusAreas);
+                case "analyze_file" -> analyzeFile(filePathStr, language, analysisLevel, focusAreas);
                 case "analyze_code" -> analyzeCode(code, language, analysisLevel, focusAreas);
-                case "compare_files" -> compareFiles(filePath, filePath2, language, focusAreas);
-                case "suggest_improvements" -> suggestImprovements(filePath, code, language, analysisLevel);
-                default -> throw new ToolExecutionException("Unknown action: " + action);
+                case "compare_files" -> compareFiles(filePathStr, filePath2Str, language, focusAreas);
+                case "suggest_improvements" -> suggestImprovements(filePathStr, code, language, analysisLevel);
+                default -> throw new ToolExecutionException("Unknown action: " + action); // Should be caught by validateInputs
             };
 
-            logger.debug("Code critique completed for action: {}", action);
-            return createTextResult(result);
+            logger.debug("Code critique completed for action: {}", action); // Use inherited logger
+            return super.createTextResult(result); // Use inherited createTextResult
 
-        } catch (Exception e) {
+        } catch (IOException e) { // Catch specific IOExceptions from file operations
+             logger.error("IO error during code critique action {}: {}", getOptionalString(arguments, "action", "unknown"), e.getMessage(), e);
+            throw new ToolExecutionException("Code critique IO failed: " + e.getMessage(), e);
+        }
+        catch (Exception e) {
             logger.error("Error in code critique", e);
             throw new ToolExecutionException("Code critique failed: " + e.getMessage(), e);
         }
     }
 
-    private String analyzeFile(String filePath, String language, String analysisLevel, List<String> focusAreas)
+    private String analyzeFile(String filePathStr, String language, String analysisLevel, List<String> focusAreas)
             throws ToolExecutionException, IOException {
+        // filePathStr null/empty check, existence, security, and isRegularFile check done in validateInputs
+        Path path = validatePath(filePathStr); // Re-validate to get Path object
 
-        if (filePath == null || filePath.trim().isEmpty()) {
-            throw new ToolExecutionException("File path is required for file analysis");
-        }
-
-        Path path = Paths.get(filePath);
-        if (!Files.exists(path)) {
-            throw new ToolExecutionException("File does not exist: " + filePath);
-        }
-
-        if (!Files.isRegularFile(path)) {
-            throw new ToolExecutionException("Path is not a regular file: " + filePath);
-        }
-
-        if (Files.size(path) > MAX_FILE_SIZE) {
-            throw new ToolExecutionException("File too large for analysis (max 1MB)");
-        }
+        // File size validation before reading
+        // Using BaseMcpTool.validateFileSize for consistency with security policies
+        validateFileSize(path); 
+        // The local MAX_FILE_SIZE can still be used for an additional, potentially stricter, check if needed.
+        // For this refactor, we'll rely on validateFileSize from BaseMcpTool primarily.
+        // If a stricter local check is needed: if (Files.size(path) > MAX_FILE_SIZE) { throw ... }
 
         String code = Files.readString(path);
-        String detectedLanguage = detectLanguage(filePath, language);
+        String detectedLanguage = detectLanguage(filePathStr, language);
 
-        return performAnalysis(code, detectedLanguage, analysisLevel, focusAreas, filePath);
+        return performAnalysis(code, detectedLanguage, analysisLevel, focusAreas, filePathStr);
     }
 
-    private String analyzeCode(String code, String language, String analysisLevel, List<String> focusAreas)
+    private String analyzeCode(String codeContent, String language, String analysisLevel, List<String> focusAreas)
             throws ToolExecutionException {
-
-        if (code == null || code.trim().isEmpty()) {
-            throw new ToolExecutionException("Code content is required for direct analysis");
-        }
-
-        if (code.length() > MAX_FILE_SIZE) {
-            throw new ToolExecutionException("Code too large for analysis (max 1MB)");
-        }
-
-        String detectedLanguage = detectLanguage("", language);
-        return performAnalysis(code, detectedLanguage, analysisLevel, focusAreas, "<direct_input>");
+        // Code null/empty and size check done in validateInputs
+        String detectedLanguage = detectLanguage("", language); // No path to infer from
+        return performAnalysis(codeContent, detectedLanguage, analysisLevel, focusAreas, "<direct_input>");
     }
 
-    private String compareFiles(String filePath1, String filePath2, String language, List<String> focusAreas)
+    private String compareFiles(String filePath1Str, String filePath2Str, String language, List<String> focusAreas)
             throws ToolExecutionException, IOException {
+        // File path null/empty checks, existence, security, and isRegularFile checks done in validateInputs
+        Path path1 = validatePath(filePath1Str);
+        Path path2 = validatePath(filePath2Str);
 
-        if (filePath1 == null || filePath2 == null) {
-            throw new ToolExecutionException("Both file paths are required for comparison");
-        }
+        validateFileSize(path1);
+        String code1 = Files.readString(path1);
 
-        // Analyze both files
-        AnalysisResult result1 = analyzeCodeInternal(Files.readString(Paths.get(filePath1)),
-                detectLanguage(filePath1, language), "standard");
-        AnalysisResult result2 = analyzeCodeInternal(Files.readString(Paths.get(filePath2)),
-                detectLanguage(filePath2, language), "standard");
+        validateFileSize(path2);
+        String code2 = Files.readString(path2);
+        
+        AnalysisResult result1 = analyzeCodeInternal(code1,
+                detectLanguage(filePath1Str, language), "standard"); // Using "standard" as per original
+        AnalysisResult result2 = analyzeCodeInternal(code2,
+                detectLanguage(filePath2Str, language), "standard");
 
-        return formatComparison(result1, result2, filePath1, filePath2);
+        return formatComparison(result1, result2, filePath1Str, filePath2Str);
     }
 
-    private String suggestImprovements(String filePath, String code, String language, String analysisLevel)
+    private String suggestImprovements(String filePathStr, String codeContent, String language, String analysisLevel)
             throws ToolExecutionException, IOException {
+        // Validation of either filePath or code presence is done in validateInputs
 
         String actualCode;
         String sourceName;
 
-        if (filePath != null && !filePath.trim().isEmpty()) {
-            actualCode = Files.readString(Paths.get(filePath));
-            sourceName = filePath;
-        } else if (code != null && !code.trim().isEmpty()) {
-            actualCode = code;
+        if (filePathStr != null && !filePathStr.trim().isEmpty()) {
+            Path path = validatePath(filePathStr);
+            // isRegularFile check done in validateInputs
+            
+            validateFileSize(path);
+            actualCode = Files.readString(path);
+            sourceName = filePathStr;
+        } else { // codeContent must be non-null and non-empty here due to validateInputs
+            // Code size check already done in validateInputs
+            actualCode = codeContent;
             sourceName = "<direct_input>";
-        } else {
-            throw new ToolExecutionException("Either file_path or code must be provided");
         }
 
-        String detectedLanguage = detectLanguage(filePath != null ? filePath : "", language);
+        String detectedLanguage = detectLanguage(filePathStr != null ? filePathStr : "", language);
         AnalysisResult result = analyzeCodeInternal(actualCode, detectedLanguage, analysisLevel);
 
         return formatImprovementSuggestions(result, sourceName, detectedLanguage);
@@ -232,12 +309,12 @@ public class CodeCritiqueTool implements McpTool {
     }
 
     private String detectLanguage(String filePath, String language) {
-        if (!"auto".equals(language) && language != null) {
+        if (!"auto".equals(language) && language != null && !language.trim().isEmpty()) {
             return language;
         }
 
-        if (filePath == null || filePath.isEmpty()) {
-            return "java"; // default
+        if (filePath == null || filePath.trim().isEmpty()) {
+            return "java"; // default if no path and language is auto/null
         }
 
         String extension = getFileExtension(filePath);
@@ -248,7 +325,7 @@ public class CodeCritiqueTool implements McpTool {
             case ".py" -> "python";
             case ".clj", ".cljs" -> "clojure";
             case ".go" -> "go";
-            default -> "java";
+            default -> "java"; // Default if extension not recognized
         };
     }
 
@@ -265,9 +342,9 @@ public class CodeCritiqueTool implements McpTool {
             case "python" -> ".py";
             case "clojure" -> ".clj";
             case "go" -> ".go";
-            default -> ".java";
+            default -> ".java"; // Default to JavaAnalyzer if language not in map key set
         };
-        return ANALYZERS.getOrDefault(extension, new JavaAnalyzer());
+        return ANALYZERS.getOrDefault(extension, new JavaAnalyzer()); // Ensure a default analyzer
     }
 
     private int calculateQualityScore(AnalysisResult result) {
@@ -459,20 +536,7 @@ public class CodeCritiqueTool implements McpTool {
         };
     }
 
-    // Helper methods
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value).trim() : defaultValue;
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods getOptionalString and createTextResult are inherited from BaseMcpTool.
 
     // Data classes
     private static class AnalysisResult {

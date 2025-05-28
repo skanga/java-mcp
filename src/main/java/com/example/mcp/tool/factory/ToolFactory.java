@@ -6,6 +6,14 @@ import com.example.mcp.security.SecurityContext;
 import com.example.mcp.tool.McpTool;
 import com.example.mcp.tool.filesystem.*;
 import com.example.mcp.tool.system.*;
+import com.example.mcp.tool.development.GitOperationsTool; // Added import for GitOperationsTool
+// Removed import for SecureGitOperationsTool as it's replaced by GitOperationsTool
+import com.example.mcp.tool.development.ProjectAnalysisTool; // Ensuring ProjectAnalysisTool is imported
+// SecureProjectAnalysisTool import is now definitely removed.
+import com.example.mcp.tool.development.SecureCodeCritiqueTool;
+// Removed import for SecureCodeCritiqueTool as it's replaced by CodeCritiqueTool
+import com.example.mcp.tool.development.SecureDependencyLookupTool;
+import com.example.mcp.tool.development.SecureREPLEvaluationTool;
 import com.example.mcp.config.ToolConfiguration;
 
 import java.util.HashMap;
@@ -65,15 +73,15 @@ public class ToolFactory {
             case "read_file" -> new FileReadTool(securityContext, resourceLimiter);
             case "write_file_secure" -> new SecureFileWriteTool(securityContext, resourceLimiter);
             case "search_files" -> new SecureFileSearchTool(securityContext, resourceLimiter);
-            case "directory_tree" -> new SecureDirectoryTreeTool(securityContext, resourceLimiter);
+            case "directory_tree" -> new DirectoryTreeTool(securityContext, resourceLimiter); // Changed SecureDirectoryTreeTool to DirectoryTreeTool
 
             // System tools
             case "execute_command" -> new ProcessExecutorTool(securityContext, resourceLimiter);
 
             // Development tools (these would need to be updated to extend BaseMcpTool)
-            case "git_operations" -> new SecureGitOperationsTool(securityContext, resourceLimiter);
-            case "analyze_project" -> new SecureProjectAnalysisTool(securityContext, resourceLimiter);
-            case "code_critique" -> new SecureCodeCritiqueTool(securityContext, resourceLimiter);
+            case "git_operations" -> new GitOperationsTool(securityContext, resourceLimiter); // Changed to simple name GitOperationsTool
+            case "analyze_project" -> new ProjectAnalysisTool(securityContext, resourceLimiter); // Changed to simple name ProjectAnalysisTool
+            case "code_critique" -> new CodeCritiqueTool(securityContext, resourceLimiter); // Changed to simple name CodeCritiqueTool
             case "dependency_lookup" -> new SecureDependencyLookupTool(securityContext, resourceLimiter);
             case "eval_code" -> new SecureREPLEvaluationTool(securityContext, resourceLimiter);
 

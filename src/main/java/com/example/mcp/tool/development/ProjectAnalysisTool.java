@@ -2,9 +2,11 @@ package com.example.mcp.tool.development;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter;
+import com.example.mcp.security.SecurityContext;
+import com.example.mcp.tool.BaseMcpTool;
+// import org.slf4j.Logger; // Logger inherited from BaseMcpTool
+// import org.slf4j.LoggerFactory; // LoggerFactory inherited from BaseMcpTool
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -17,8 +19,8 @@ import java.util.stream.Collectors;
 /**
  * Project Analysis Tool - Analyze project structure, dependencies, and generate summaries
  */
-public class ProjectAnalysisTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(ProjectAnalysisTool.class);
+public class ProjectAnalysisTool extends BaseMcpTool {
+    // private static final Logger logger = LoggerFactory.getLogger(ProjectAnalysisTool.class); // Logger inherited
 
     // File patterns for different project types
     private static final Map<String, List<String>> PROJECT_PATTERNS = Map.of(
@@ -35,6 +37,10 @@ public class ProjectAnalysisTool implements McpTool {
     private static final Set<String> CODE_EXTENSIONS = Set.of(
             ".java", ".kt", ".scala", ".clj", ".cljs", ".js", ".ts", ".py", ".rb", ".go", ".rs", ".cpp", ".c", ".h"
     );
+
+    public ProjectAnalysisTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+    }
 
     @Override
     public String getName() {
@@ -90,22 +96,47 @@ public class ProjectAnalysisTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String pathStr = getOptionalString(arguments, "path", ".");
+        Path projectPath = validatePath(pathStr); // From BaseMcpTool
+
+        if (!Files.isDirectory(projectPath)) {
+            throw new ToolExecutionException("Project path is not a directory: " + projectPath);
+        }
+
+        // Validate max_depth
+        int maxDepth = getOptionalInt(arguments, "max_depth", 5);
+        if (maxDepth < 1 || maxDepth > 10) { // As per original schema
+            throw new ToolExecutionException("max_depth must be between 1 and 10.");
+        }
+
+        // Validate analysis_type (enum)
+        String analysisType = getOptionalString(arguments, "analysis_type", "full");
+        List<String> validAnalysisTypes = List.of("full", "structure", "dependencies", "metrics", "summary");
+        if (!validAnalysisTypes.contains(analysisType)) {
+            throw new ToolExecutionException("Invalid analysis_type: " + analysisType + ". Must be one of " + validAnalysisTypes);
+        }
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        return resourceLimiter.acquireFileOperation("project_analysis");
+    }
+
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
             String pathStr = getOptionalString(arguments, "path", ".");
+            Path projectPath = validatePath(pathStr); // Path already validated by validateInputs
+
             String analysisType = getOptionalString(arguments, "analysis_type", "full");
             int maxDepth = getOptionalInt(arguments, "max_depth", 5);
             boolean includeTestFiles = getOptionalBoolean(arguments, "include_test_files", true);
             boolean generateSummary = getOptionalBoolean(arguments, "generate_summary", false);
-            @SuppressWarnings("unchecked")
-            List<String> excludePatterns = (List<String>) arguments.getOrDefault("exclude_patterns",
+            List<String> excludePatterns = getOptionalStringList(arguments, "exclude_patterns",
                     List.of("node_modules", "target", "build", ".git", "*.log"));
 
-            // Validate path
-            Path projectPath = Paths.get(pathStr);
-            if (!Files.exists(projectPath) || !Files.isDirectory(projectPath)) {
-                throw new ToolExecutionException("Path does not exist or is not a directory: " + pathStr);
-            }
+            // Path existence and directory check done in validateInputs
 
             // Perform analysis
             ProjectAnalysis analysis = analyzeProject(projectPath, maxDepth, includeTestFiles, excludePatterns);
@@ -117,23 +148,33 @@ public class ProjectAnalysisTool implements McpTool {
                 case "metrics" -> formatMetricsAnalysis(analysis);
                 case "summary" -> formatProjectSummary(analysis, generateSummary);
                 case "full" -> formatFullAnalysis(analysis, generateSummary);
-                default -> throw new ToolExecutionException("Unknown analysis type: " + analysisType);
+                default -> throw new ToolExecutionException("Unknown analysis type: " + analysisType); // Should be caught by validateInputs
             };
 
-            logger.debug("Project analysis completed for: {}", pathStr);
-            return createTextResult(result);
+            logger.debug("Project analysis completed for: {}", projectPath); // Use validated path
+            return super.createTextResult(result); // Use BaseMcpTool's createTextResult
 
-        } catch (Exception e) {
-            logger.error("Error analyzing project", e);
-            throw new ToolExecutionException("Project analysis failed: " + e.getMessage(), e);
+        } catch (IOException e) { // Catch specific IOException from analyzeProject
+             logger.error("IO error during project analysis for path: {}", getOptionalString(arguments, "path", "."), e);
+            throw new ToolExecutionException("Project analysis IO failed: " + e.getMessage(), e);
+        } catch (ToolExecutionException e) { // Rethrow ToolExecutionExceptions
+            throw e;
+        }
+        catch (Exception e) { // Catch any other unexpected exceptions
+            logger.error("Unexpected error analyzing project", e);
+            throw new ToolExecutionException("Unexpected project analysis error: " + e.getMessage(), e);
         }
     }
 
     private ProjectAnalysis analyzeProject(Path projectPath, int maxDepth, boolean includeTestFiles,
-                                           List<String> excludePatterns) throws IOException {
+                                           List<String> excludePatterns) throws IOException, ToolExecutionException {
+        // Ensure the root project path itself is allowed before walking
+        if (!securityContext.isFileAllowed(projectPath)) {
+            throw new ToolExecutionException("Access to project path is denied by security policy: " + projectPath);
+        }
 
         ProjectAnalysis analysis = new ProjectAnalysis(projectPath);
-        ProjectVisitor visitor = new ProjectVisitor(analysis, includeTestFiles, excludePatterns);
+        ProjectVisitor visitor = new ProjectVisitor(analysis, includeTestFiles, excludePatterns, securityContext); // Pass SecurityContext
 
         Files.walkFileTree(projectPath,
                 Set.of(FileVisitOption.FOLLOW_LINKS),
@@ -152,7 +193,7 @@ public class ProjectAnalysisTool implements McpTool {
         return analysis;
     }
 
-    private Set<String> detectProjectTypes(Path projectPath) throws IOException {
+    private Set<String> detectProjectTypes(Path projectPath) throws IOException, ToolExecutionException {
         Set<String> types = new HashSet<>();
 
         for (Map.Entry<String, List<String>> entry : PROJECT_PATTERNS.entrySet()) {
@@ -160,17 +201,24 @@ public class ProjectAnalysisTool implements McpTool {
             List<String> patterns = entry.getValue();
 
             for (String pattern : patterns) {
-                if (Files.exists(projectPath.resolve(pattern))) {
-                    types.add(projectType);
-                    break;
+                Path specificFilePath = projectPath.resolve(pattern);
+                if (Files.exists(specificFilePath)) {
+                    // Before checking existence, ensure it's allowed to be accessed (though it's under root)
+                    // and validate its size if we were to read it here.
+                    // For now, just checking existence as original code.
+                    if (securityContext.isFileAllowed(specificFilePath)) {
+                         types.add(projectType);
+                         break;
+                    } else {
+                        logger.warn("Access to project file {} denied by security policy.", specificFilePath);
+                    }
                 }
             }
         }
-
         return types;
     }
 
-    private void analyzeDependencies(ProjectAnalysis analysis) {
+    private void analyzeDependencies(ProjectAnalysis analysis) throws ToolExecutionException { // Added ToolExecutionException
         // Analyze based on detected project types
         for (String type : analysis.projectTypes) {
             switch (type) {
@@ -183,10 +231,11 @@ public class ProjectAnalysisTool implements McpTool {
         }
     }
 
-    private void analyzeMavenDependencies(ProjectAnalysis analysis) {
+    private void analyzeMavenDependencies(ProjectAnalysis analysis) throws ToolExecutionException {
         Path pomPath = analysis.rootPath.resolve("pom.xml");
-        if (Files.exists(pomPath)) {
+        if (Files.exists(pomPath) && securityContext.isFileAllowed(pomPath)) {
             try {
+                validateFileSize(pomPath); // Validate size before reading
                 String content = Files.readString(pomPath);
 
                 // Extract dependencies using regex (simplified)
@@ -208,17 +257,20 @@ public class ProjectAnalysisTool implements McpTool {
                 extractProjectInfo(analysis, content, "maven");
 
             } catch (IOException e) {
-                logger.debug("Could not read pom.xml: {}", e.getMessage());
+                logger.warn("Could not read pom.xml: {}", e.getMessage()); // Changed to warn
             }
+        } else if (Files.exists(pomPath)) {
+             logger.warn("Access to pom.xml denied by security policy: {}", pomPath);
         }
     }
 
-    private void analyzeGradleDependencies(ProjectAnalysis analysis) {
+    private void analyzeGradleDependencies(ProjectAnalysis analysis) throws ToolExecutionException {
         // Try both build.gradle and build.gradle.kts
-        for (String buildFile : List.of("build.gradle", "build.gradle.kts")) {
-            Path buildPath = analysis.rootPath.resolve(buildFile);
-            if (Files.exists(buildPath)) {
+        for (String buildFileName : List.of("build.gradle", "build.gradle.kts")) {
+            Path buildPath = analysis.rootPath.resolve(buildFileName);
+            if (Files.exists(buildPath) && securityContext.isFileAllowed(buildPath)) {
                 try {
+                    validateFileSize(buildPath); // Validate size before reading
                     String content = Files.readString(buildPath);
 
                     // Extract dependencies using regex (simplified)
@@ -236,16 +288,19 @@ public class ProjectAnalysisTool implements McpTool {
 
                     break; // Found one, stop looking
                 } catch (IOException e) {
-                    logger.debug("Could not read {}: {}", buildFile, e.getMessage());
+                    logger.warn("Could not read {}: {}", buildFileName, e.getMessage());
                 }
+            } else if (Files.exists(buildPath)) {
+                logger.warn("Access to {} denied by security policy: {}", buildFileName, buildPath);
             }
         }
     }
 
-    private void analyzeNpmDependencies(ProjectAnalysis analysis) {
+    private void analyzeNpmDependencies(ProjectAnalysis analysis) throws ToolExecutionException {
         Path packagePath = analysis.rootPath.resolve("package.json");
-        if (Files.exists(packagePath)) {
+        if (Files.exists(packagePath) && securityContext.isFileAllowed(packagePath)) {
             try {
+                validateFileSize(packagePath); // Validate size before reading
                 String content = Files.readString(packagePath);
 
                 // Extract dependencies using regex (simplified JSON parsing)
@@ -275,16 +330,19 @@ public class ProjectAnalysisTool implements McpTool {
                 extractProjectInfo(analysis, content, "npm");
 
             } catch (IOException e) {
-                logger.debug("Could not read package.json: {}", e.getMessage());
+                logger.warn("Could not read package.json: {}", e.getMessage());
             }
+        } else if (Files.exists(packagePath)) {
+            logger.warn("Access to package.json denied by security policy: {}", packagePath);
         }
     }
 
-    private void analyzePythonDependencies(ProjectAnalysis analysis) {
+    private void analyzePythonDependencies(ProjectAnalysis analysis) throws ToolExecutionException {
         // Check requirements.txt
         Path reqPath = analysis.rootPath.resolve("requirements.txt");
-        if (Files.exists(reqPath)) {
+        if (Files.exists(reqPath) && securityContext.isFileAllowed(reqPath)) {
             try {
+                validateFileSize(reqPath); // Validate size before reading
                 List<String> lines = Files.readAllLines(reqPath);
                 for (String line : lines) {
                     line = line.trim();
@@ -296,8 +354,10 @@ public class ProjectAnalysisTool implements McpTool {
                     }
                 }
             } catch (IOException e) {
-                logger.debug("Could not read requirements.txt: {}", e.getMessage());
+                logger.warn("Could not read requirements.txt: {}", e.getMessage());
             }
+        } else if (Files.exists(reqPath)) {
+            logger.warn("Access to requirements.txt denied by security policy: {}", reqPath);
         }
     }
 
@@ -458,7 +518,7 @@ public class ProjectAnalysisTool implements McpTool {
             result.append("\n🔹 ").append(type.toUpperCase()).append(" (").append(deps.size()).append("):\n");
             for (Dependency dep : deps) {
                 result.append("  • ").append(dep.name);
-                if (dep.version != null && !dep.version.equals(dep.type)) {
+                if (dep.version != null && !dep.version.equals(dep.type)) { // Avoid printing type as version for gradle
                     result.append(" : ").append(dep.version);
                 }
                 result.append("\n");
@@ -505,44 +565,13 @@ public class ProjectAnalysisTool implements McpTool {
                 .collect(Collectors.toList());
 
         for (String dir : sortedDirs) {
-            String[] parts = dir.split("/");
+            String[] parts = dir.split("/"); // This might need platform-specific separator
             String indent = "  ".repeat(parts.length);
             result.append(indent).append("├── ").append(parts[parts.length - 1]).append("/\n");
         }
     }
 
-    // Helper methods for parameter extraction
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value) : defaultValue;
-    }
-
-    private int getOptionalInt(Map<String, Object> arguments, String key, int defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Number) return ((Number) value).intValue();
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private boolean getOptionalBoolean(Map<String, Object> arguments, String key, boolean defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Boolean) return (Boolean) value;
-        return Boolean.parseBoolean(String.valueOf(value));
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods (getOptionalString, etc.) removed as they are inherited from BaseMcpTool
 
     // Data classes
     private static class ProjectAnalysis {
@@ -584,67 +613,73 @@ public class ProjectAnalysisTool implements McpTool {
         private final ProjectAnalysis analysis;
         private final boolean includeTestFiles;
         private final List<Pattern> excludePatterns;
+        private final SecurityContext securityContext; // Added SecurityContext
 
-        ProjectVisitor(ProjectAnalysis analysis, boolean includeTestFiles, List<String> excludePatterns) {
+        ProjectVisitor(ProjectAnalysis analysis, boolean includeTestFiles, List<String> excludePatterns, SecurityContext securityContext) {
             this.analysis = analysis;
             this.includeTestFiles = includeTestFiles;
             this.excludePatterns = excludePatterns.stream()
-                    .map(pattern -> Pattern.compile(pattern.replace("*", ".*")))
+                    .map(pattern -> Pattern.compile(pattern.replace("*", ".*"))) // Basic glob to regex
                     .collect(Collectors.toList());
+            this.securityContext = securityContext; // Store SecurityContext
         }
 
         @Override
         public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-            String dirName = dir.getFileName().toString();
+            if (!securityContext.isFileAllowed(dir)) { // Check if directory itself is allowed
+                logger.debug("Skipping directory due to security policy: {}", dir);
+                return FileVisitResult.SKIP_SUBTREE;
+            }
 
-            // Check exclude patterns
+            String dirName = dir.getFileName().toString();
             for (Pattern pattern : excludePatterns) {
                 if (pattern.matcher(dirName).matches()) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
             }
-
-            // Skip test directories if not including test files
-            if (!includeTestFiles && (dirName.equals("test") || dirName.equals("tests") ||
-                    dirName.contains("test"))) {
+            if (!includeTestFiles && (dirName.equals("test") || dirName.equals("tests") || dirName.contains("test"))) {
                 return FileVisitResult.SKIP_SUBTREE;
             }
-
             analysis.directories.add(dir);
             return FileVisitResult.CONTINUE;
         }
 
         @Override
         public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-            String fileName = file.getFileName().toString();
+            if (!securityContext.isFileAllowed(file)) { // Check if file is allowed
+                logger.debug("Skipping file due to security policy: {}", file);
+                return FileVisitResult.CONTINUE;
+            }
 
-            // Check exclude patterns
+            String fileName = file.getFileName().toString();
             for (Pattern pattern : excludePatterns) {
                 if (pattern.matcher(fileName).matches()) {
                     return FileVisitResult.CONTINUE;
                 }
             }
-
-            // Skip test files if not including them
-            if (!includeTestFiles && (fileName.contains("test") || fileName.contains("Test") ||
-                    fileName.contains("spec") || fileName.contains("Spec"))) {
+            if (!includeTestFiles && (fileName.contains("test") || fileName.contains("Test") || fileName.contains("spec") || fileName.contains("Spec"))) {
                 return FileVisitResult.CONTINUE;
             }
 
-            // Get file extension
             String extension = getFileExtension(fileName);
             analysis.filesByType.computeIfAbsent(extension, k -> new ArrayList<>()).add(file);
 
-            // Count lines for code files
             if (CODE_EXTENSIONS.contains(extension)) {
                 try {
+                    // It's good practice to check file size before reading all lines,
+                    // but BaseMcpTool.validateFileSize is not directly available here.
+                    // This check should ideally be done before calling Files.lines().
+                    // For now, we proceed as original, but this is a point for future enhancement.
+                    // securityContext.validateFileSize(file); // conceptual placement
                     long lines = Files.lines(file).count();
                     analysis.totalLines += (int) lines;
-                } catch (Exception e) {
-                    // Ignore files that can't be read
+                } catch (SecurityException se) {
+                    logger.warn("Security exception while counting lines for file {}: {}", file, se.getMessage());
+                }
+                catch (IOException | UncheckedIOException e) { // Catch UncheckedIOException from Files.lines
+                    logger.warn("Could not count lines for file {}: {}", file, e.getMessage());
                 }
             }
-
             return FileVisitResult.CONTINUE;
         }
 
