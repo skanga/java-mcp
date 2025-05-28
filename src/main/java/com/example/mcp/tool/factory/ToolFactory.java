@@ -12,7 +12,12 @@ import com.example.mcp.tool.development.CodeCritiqueTool; // Corrected import
 import com.example.mcp.tool.development.DependencyLookupTool;
 import com.example.mcp.tool.development.REPLEvaluationTool;
 import com.example.mcp.tool.builtin.CurrentTimeTool;
-import com.example.mcp.tool.builtin.EchoTool; // Added import for EchoTool
+import com.example.mcp.tool.builtin.EchoTool;
+import com.example.mcp.tool.builtin.HelloTool;
+import com.example.mcp.tool.builtin.MathTool;
+import com.example.mcp.tool.builtin.RandomTool;
+import com.example.mcp.tool.ai.ArchitectTool; // Added import for ArchitectTool
+import com.example.mcp.ai.AIClient; // Added import for AIClient
 import com.example.mcp.config.ToolConfiguration;
 
 import java.util.HashMap;
@@ -25,16 +30,20 @@ import java.util.Set;
 public class ToolFactory {
     private final SecurityContext securityContext;
     private final ResourceLimiter resourceLimiter;
+    private final AIClient aiClient; // Added AIClient field
     private final Map<String, McpTool> toolCache = new HashMap<>();
 
     public ToolFactory(String environment) {
         this.securityContext = ToolConfiguration.createSecurityContext(environment);
         this.resourceLimiter = ToolConfiguration.createResourceLimiter(environment);
+        this.aiClient = new AIClient(); // Initialize AIClient using its default constructor
     }
 
-    public ToolFactory(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+    // Modified constructor to accept AIClient
+    public ToolFactory(SecurityContext securityContext, ResourceLimiter resourceLimiter, AIClient aiClient) {
         this.securityContext = securityContext;
         this.resourceLimiter = resourceLimiter;
+        this.aiClient = aiClient; // Store AIClient
     }
 
     /**
@@ -57,7 +66,9 @@ public class ToolFactory {
                 "git_operations", "analyze_project",
                 "code_critique", "dependency_lookup", "eval_code",
                 // Built-in tools
-                "current_time", "echo"
+                "current_time", "echo", "hello", "math", "random",
+                // AI Tools
+                "architect"
         );
     }
 
@@ -93,6 +104,12 @@ public class ToolFactory {
             // Built-in tools
             case "current_time" -> new CurrentTimeTool(securityContext, resourceLimiter);
             case "echo" -> new EchoTool(securityContext, resourceLimiter);
+            case "hello" -> new HelloTool(securityContext, resourceLimiter);
+            case "math" -> new MathTool(securityContext, resourceLimiter);
+            case "random" -> new RandomTool(securityContext, resourceLimiter);
+
+            // AI Tools
+            case "architect" -> new ArchitectTool(securityContext, resourceLimiter, this.aiClient);
 
             default -> throw new IllegalArgumentException("Unknown tool: " + toolName);
         };

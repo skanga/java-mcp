@@ -2,21 +2,29 @@ package com.example.mcp.tool.builtin;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
+// Unused imports: LocalDateTime, DateTimeFormatter, Random
+// import java.time.LocalDateTime;
+// import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
+// import java.util.Random;
 
 /**
  * Hello World tool - returns a friendly greeting
  */
-public class HelloTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(HelloTool.class);
+public class HelloTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(HelloTool.class); // Logger inherited
+
+    // Constructor added
+    public HelloTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+    }
 
     @Override
     public String getName() {
@@ -49,15 +57,33 @@ public class HelloTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String name = getOptionalString(arguments, "name", "World");
+        if (name.length() > 100) { // MaxLength from schema
+            throw new ToolExecutionException("Name too long (max 100 characters)");
+        }
+
+        String language = getOptionalString(arguments, "language", "en");
+        List<String> validLanguages = List.of("en", "es", "fr", "de"); // From schema
+        if (!validLanguages.contains(language.toLowerCase())) {
+            throw new ToolExecutionException("Invalid language: " + language + ". Must be one of " + validLanguages);
+        }
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // Hello tool is very lightweight.
+        return resourceLimiter.acquireFileOperation("metadata_access"); // Or a more fitting light-weight/no-op permit
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String name = getOptionalString(arguments, "name", "World");
+            String name = getOptionalString(arguments, "name", "World"); // Use inherited
             String language = getOptionalString(arguments, "language", "en");
 
-            // Validate name length
-            if (name.length() > 100) {
-                throw new ToolExecutionException("Name too long (max 100 characters)");
-            }
+            // Validations moved to validateInputs
 
             String greeting = switch (language.toLowerCase()) {
                 case "es" -> "¡Hola, " + name + "! 👋 ¡Saludos desde el servidor MCP!";
@@ -66,27 +92,17 @@ public class HelloTool implements McpTool {
                 default -> "Hello, " + name + "! 👋 Greetings from the MCP Hello World Server!";
             };
 
-            logger.debug("Generated greeting for name='{}' in language='{}'", name, language);
-            return createTextResult(greeting);
+            logger.debug("Generated greeting for name='{}' in language='{}'", name, language); // Use inherited logger
+            return super.createTextResult(greeting); // Use inherited createTextResult
 
-        } catch (Exception e) {
+        } catch (Exception e) { // Catch any other unexpected exceptions
             logger.error("Error in HelloTool execution", e);
+            if (e instanceof ToolExecutionException) throw (ToolExecutionException) e; // Avoid re-wrapping
             throw new ToolExecutionException("Failed to generate greeting: " + e.getMessage(), e);
         }
     }
 
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value).trim() : defaultValue;
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods getOptionalString and createTextResult are removed
+    // as they are inherited from BaseMcpTool.
 }
 

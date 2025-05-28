@@ -2,9 +2,11 @@ package com.example.mcp.tool.builtin;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
 import java.util.List;
 import java.util.Map;
@@ -13,9 +15,15 @@ import java.util.Random;
 /**
  * Random Number Generator tool
  */
-public class RandomTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(RandomTool.class);
-    private static final Random random = new Random();
+public class RandomTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(RandomTool.class); // Logger inherited
+    private static final Random random = new Random(); // Stays static
+
+    // Constructor added
+    public RandomTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+        // The static 'random' instance can remain.
+    }
 
     @Override
     public String getName() {
@@ -60,14 +68,49 @@ public class RandomTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String type = getOptionalString(arguments, "type", "integer");
+        List<String> validTypes = List.of("integer", "decimal", "boolean");
+        if (!validTypes.contains(type.toLowerCase())) {
+            throw new ToolExecutionException("Unknown random type: " + type + ". Must be one of " + validTypes);
+        }
+
+        int count = getOptionalInt(arguments, "count", 1);
+        if (count < 1 || count > 20) { // Min/Max from schema
+            throw new ToolExecutionException("Count must be between 1 and 20");
+        }
+
+        // Min/max validation depends on 'type' and their values.
+        if (type.equalsIgnoreCase("integer")) {
+            int min = getOptionalInt(arguments, "min", 1);
+            int max = getOptionalInt(arguments, "max", 100);
+            if (min > max) {
+                throw new ToolExecutionException("Min value cannot be greater than max value for type 'integer'");
+            }
+        } else if (type.equalsIgnoreCase("decimal")) {
+            double min = getOptionalNumber(arguments, "min", 0.0).doubleValue();
+            double max = getOptionalNumber(arguments, "max", 1.0).doubleValue();
+            if (min >= max) { // For decimal, min must be strictly less than max
+                throw new ToolExecutionException("Min value must be less than max value for type 'decimal'");
+            }
+        }
+        // No min/max for boolean type
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // Random tool is purely computational.
+        return resourceLimiter.acquireFileOperation("metadata_access"); // Or a CPU-specific or no-op permit
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String type = getOptionalString(arguments, "type", "integer");
+            String type = getOptionalString(arguments, "type", "integer"); // Use inherited
             int count = getOptionalInt(arguments, "count", 1);
 
-            if (count < 1 || count > 20) {
-                throw new ToolExecutionException("Count must be between 1 and 20");
-            }
+            // Validations for count, type, min/max moved to validateInputs
 
             StringBuilder result = new StringBuilder();
 
@@ -78,18 +121,14 @@ public class RandomTool implements McpTool {
                     case "integer" -> {
                         int min = getOptionalInt(arguments, "min", 1);
                         int max = getOptionalInt(arguments, "max", 100);
-                        if (min > max) {
-                            throw new ToolExecutionException("Min value cannot be greater than max value");
-                        }
+                        // min > max check done in validateInputs
                         int value = random.nextInt(max - min + 1) + min;
                         result.append(value);
                     }
                     case "decimal" -> {
-                        double min = getOptionalDouble(arguments, "min", 0.0);
-                        double max = getOptionalDouble(arguments, "max", 1.0);
-                        if (min >= max) {
-                            throw new ToolExecutionException("Min value must be less than max value");
-                        }
+                        double min = getOptionalNumber(arguments, "min", 0.0).doubleValue(); // Use inherited
+                        double max = getOptionalNumber(arguments, "max", 1.0).doubleValue(); // Use inherited
+                        // min >= max check done in validateInputs
                         double value = random.nextDouble() * (max - min) + min;
                         result.append(String.format("%.6f", value));
                     }
@@ -97,7 +136,7 @@ public class RandomTool implements McpTool {
                         boolean value = random.nextBoolean();
                         result.append(value);
                     }
-                    default -> throw new ToolExecutionException("Unknown random type: " + type);
+                    default -> throw new ToolExecutionException("Unknown random type: " + type); // Should be caught by validateInputs
                 }
             }
 
@@ -105,56 +144,16 @@ public class RandomTool implements McpTool {
                     String.format("Random %s: %s", type, result.toString()) :
                     String.format("Random %s values (%d): %s", type, count, result.toString());
 
-            logger.debug("Generated {} random {} value(s)", count, type);
-            return createTextResult(responseText);
+            logger.debug("Generated {} random {} value(s)", count, type); // Use inherited logger
+            return super.createTextResult(responseText); // Use inherited createTextResult
 
-        } catch (Exception e) {
+        } catch (Exception e) { // Catch any other unexpected exceptions
             logger.error("Error in RandomTool execution", e);
+            if (e instanceof ToolExecutionException) throw (ToolExecutionException) e; // Avoid re-wrapping
             throw new ToolExecutionException("Random number generation failed: " + e.getMessage(), e);
         }
     }
 
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value).trim() : defaultValue;
-    }
-
-    private int getOptionalInt(Map<String, Object> arguments, String key, int defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) {
-            return defaultValue;
-        }
-        if (value instanceof Number) {
-            return ((Number) value).intValue();
-        }
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private double getOptionalDouble(Map<String, Object> arguments, String key, double defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) {
-            return defaultValue;
-        }
-        if (value instanceof Number) {
-            return ((Number) value).doubleValue();
-        }
-        try {
-            return Double.parseDouble(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods getOptionalString, getOptionalInt, getOptionalDouble, and createTextResult are removed
+    // as they are inherited from BaseMcpTool.
 }

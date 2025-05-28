@@ -3,9 +3,11 @@ package com.example.mcp.tool.ai;
 import com.example.mcp.ai.AIClient;
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
 import java.util.List;
 import java.util.Map;
@@ -13,9 +15,9 @@ import java.util.Map;
 /**
  * Architect Tool - AI-powered system architecture analysis and design agent
  */
-public class ArchitectTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(ArchitectTool.class);
-    private final AIClient aiClient;
+public class ArchitectTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(ArchitectTool.class); // Logger inherited
+    private final AIClient aiClient; // Kept as final field
 
     // System prompt based on clojure-mcp architect agent
     private static final String ARCHITECT_SYSTEM_PROMPT = """
@@ -61,7 +63,9 @@ Structure your responses with clear sections:
 Always consider maintainability, testability, and operational excellence in your recommendations.
 """;
 
-    public ArchitectTool(AIClient aiClient) {
+    // Constructor updated
+    public ArchitectTool(SecurityContext securityContext, ResourceLimiter resourceLimiter, AIClient aiClient) {
+        super(securityContext, resourceLimiter);
         this.aiClient = aiClient;
     }
 
@@ -127,16 +131,52 @@ Always consider maintainability, testability, and operational excellence in your
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        getRequiredString(arguments, "task"); // Ensure 'task' is present
+
+        String systemType = getOptionalString(arguments, "system_type", "other");
+        List<String> validSystemTypes = List.of("web_application", "mobile_application", "microservices", "data_platform", "api_service", "enterprise_system", "real_time_system", "batch_processing", "other");
+        if (!validSystemTypes.contains(systemType)) {
+            throw new ToolExecutionException("Invalid system_type: " + systemType);
+        }
+
+        String scale = getOptionalString(arguments, "scale", "unknown");
+        List<String> validScales = List.of("startup", "small_business", "enterprise", "internet_scale", "unknown");
+        if (!validScales.contains(scale)) {
+            throw new ToolExecutionException("Invalid scale: " + scale);
+        }
+
+        String aiProvider = getOptionalString(arguments, "ai_provider", "auto");
+        List<String> validAiProviders = List.of("anthropic", "openai", "gemini", "auto");
+        if (!validAiProviders.contains(aiProvider)) {
+            throw new ToolExecutionException("Invalid ai_provider: " + aiProvider);
+        }
+
+        String detailLevel = getOptionalString(arguments, "detail_level", "detailed");
+        List<String> validDetailLevels = List.of("overview", "detailed", "comprehensive");
+        if (!validDetailLevels.contains(detailLevel)) {
+            throw new ToolExecutionException("Invalid detail_level: " + detailLevel);
+        }
+        // No file paths or system commands to validate with securityContext in this tool's direct inputs.
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // This tool makes external HTTP calls via AIClient.
+        // Use a network operation permit.
+        return resourceLimiter.acquireNetworkOperation("ai_service_access");
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String task = getRequiredString(arguments, "task");
+            String task = getRequiredString(arguments, "task"); // Use inherited
             String context = getOptionalString(arguments, "context", "");
             String systemType = getOptionalString(arguments, "system_type", "other");
             String scale = getOptionalString(arguments, "scale", "unknown");
-            @SuppressWarnings("unchecked")
-            List<String> preferredTechnologies = (List<String>) arguments.getOrDefault("preferred_technologies", List.of());
-            @SuppressWarnings("unchecked")
-            List<String> constraints = (List<String>) arguments.getOrDefault("constraints", List.of());
+            List<String> preferredTechnologies = getOptionalStringList(arguments, "preferred_technologies", List.of()); // Use inherited
+            List<String> constraints = getOptionalStringList(arguments, "constraints", List.of()); // Use inherited
             String aiProvider = getOptionalString(arguments, "ai_provider", "auto");
             String detailLevel = getOptionalString(arguments, "detail_level", "detailed");
 
@@ -197,37 +237,19 @@ Always consider maintainability, testability, and operational excellence in your
                 responseBuilder.append("**Token Usage**: ").append(aiResponse.getUsage().toString());
             }
 
-            logger.info("Architect analysis completed using {} provider", aiResponse.getProvider());
-            return createTextResult(responseBuilder.toString());
+            logger.info("Architect analysis completed using {} provider", aiResponse.getProvider()); // Use inherited logger
+            return super.createTextResult(responseBuilder.toString()); // Use inherited createTextResult
 
         } catch (AIClient.AIException e) {
             logger.error("AI request failed for architect tool", e);
             throw new ToolExecutionException("Architecture analysis failed: " + e.getMessage(), e);
-        } catch (Exception e) {
+        } catch (Exception e) { // Catch any other unexpected exceptions
             logger.error("Error in architect tool execution", e);
+            if (e instanceof ToolExecutionException) throw (ToolExecutionException) e; // Avoid re-wrapping
             throw new ToolExecutionException("Architect tool failed: " + e.getMessage(), e);
         }
     }
 
-    private String getRequiredString(Map<String, Object> arguments, String key) throws ToolExecutionException {
-        Object value = arguments.get(key);
-        if (value == null || String.valueOf(value).trim().isEmpty()) {
-            throw new ToolExecutionException("Missing required parameter: " + key);
-        }
-        return String.valueOf(value).trim();
-    }
-
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value).trim() : defaultValue;
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods getRequiredString, getOptionalString, and createTextResult are removed
+    // as they are inherited from BaseMcpTool.
 }
