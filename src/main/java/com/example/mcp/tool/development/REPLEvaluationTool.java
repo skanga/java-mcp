@@ -2,9 +2,11 @@ package com.example.mcp.tool.development;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
 import javax.script.*;
 import java.io.StringWriter;
@@ -15,11 +17,17 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * REPL Evaluation Tool - Execute code in various languages (Java, JavaScript, Python)
  */
-public class REPLEvaluationTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(REPLEvaluationTool.class);
-    private static final Map<String, ScriptEngine> engines = new ConcurrentHashMap<>();
-    private static final int MAX_CODE_LENGTH = 10000;
-    private static final int MAX_OUTPUT_LENGTH = 50000;
+public class REPLEvaluationTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(REPLEvaluationTool.class); // Logger inherited
+    private static final Map<String, ScriptEngine> engines = new ConcurrentHashMap<>(); // Stays static
+    private static final int MAX_CODE_LENGTH = 10000; // Stays static
+    private static final int MAX_OUTPUT_LENGTH = 50000; // Stays static
+
+    // Constructor added
+    public REPLEvaluationTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+        // Static 'engines' map initialization remains in static block.
+    }
 
     static {
         // Initialize available script engines
@@ -39,7 +47,10 @@ public class REPLEvaluationTool implements McpTool {
                 engines.put("groovy", groovyEngine);
             }
         } catch (Exception e) {
-            logger.debug("Groovy engine not available: {}", e.getMessage());
+            // Static logger is not available here before BaseMcpTool constructor is called for an instance.
+            // This debug log might be lost or needs a static logger if critical.
+            // For now, assuming this is acceptable as it's a one-time setup warning.
+            System.err.println("Groovy engine not available: " + e.getMessage());
         }
 
         // Try Python (Jython) if available
@@ -49,7 +60,7 @@ public class REPLEvaluationTool implements McpTool {
                 engines.put("python", pythonEngine);
             }
         } catch (Exception e) {
-            logger.debug("Python engine not available: {}", e.getMessage());
+            System.err.println("Python engine not available: " + e.getMessage());
         }
     }
 
@@ -101,25 +112,53 @@ public class REPLEvaluationTool implements McpTool {
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String code = getRequiredString(arguments, "code");
+        if (code.length() > MAX_CODE_LENGTH) { 
+            throw new ToolExecutionException("Code too long (max " + MAX_CODE_LENGTH + " characters)");
+        }
+
+        String language = getOptionalString(arguments, "language", "javascript").toLowerCase();
+        if (!engines.containsKey(language)) {
+            throw new ToolExecutionException("Language not supported: " + language + ". Available: " + engines.keySet());
+        }
+
+        int timeoutSeconds = getOptionalInt(arguments, "timeout_seconds", 10);
+        if (timeoutSeconds < 1 || timeoutSeconds > 30) { 
+            throw new ToolExecutionException("Timeout must be between 1 and 30 seconds.");
+        }
+        
+        // Optional: Validate variable names or types if security policy dictated it.
+        // Map<String, Object> variables = getOptionalMap(arguments, "variables", Map.of());
+        // for (String key : variables.keySet()) {
+        //    if (!key.matches("[a-zA-Z_][a-zA-Z0-9_]*")) { // Example validation
+        //        throw new ToolExecutionException("Invalid variable name: " + key);
+        //    }
+        // }
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        return resourceLimiter.acquireProcessOperation(); // Or a more specific type like acquireCodeExecutionPermit()
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String code = getRequiredString(arguments, "code");
+            String code = getRequiredString(arguments, "code"); // Use inherited
             String language = getOptionalString(arguments, "language", "javascript").toLowerCase();
             int timeoutSeconds = getOptionalInt(arguments, "timeout_seconds", 10);
             boolean captureOutput = getOptionalBoolean(arguments, "capture_output", true);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> variables = (Map<String, Object>) arguments.getOrDefault("variables", Map.of());
+            // Using getOptionalMap for variables for better type safety, though current cast is acceptable.
+            Map<String, Object> variables = getOptionalMap(arguments, "variables", Map.of());
 
-            // Validate code length
-            if (code.length() > MAX_CODE_LENGTH) {
-                throw new ToolExecutionException("Code too long (max " + MAX_CODE_LENGTH + " characters)");
-            }
 
-            // Get script engine
+            // Validation for code length and language support already done in validateInputs.
+            // Timeout validation also done in validateInputs.
+
             ScriptEngine engine = engines.get(language);
-            if (engine == null) {
-                throw new ToolExecutionException("Language not supported: " + language + ". Available: " + engines.keySet());
-            }
+            // Engine null check already effectively done by validateInputs's engines.containsKey(language)
 
             // Execute code
             EvaluationResult result = executeCode(engine, code, variables, captureOutput, timeoutSeconds);
@@ -127,18 +166,20 @@ public class REPLEvaluationTool implements McpTool {
             // Format response
             String response = formatEvaluationResult(result, language, code);
 
-            logger.debug("Code evaluation completed for language: {}", language);
-            return createTextResult(response);
+            logger.debug("Code evaluation completed for language: {}", language); // Use inherited logger
+            return super.createTextResult(response); // Use inherited createTextResult
 
-        } catch (Exception e) {
+        } catch (Exception e) { // Catch any exception not already ToolExecutionException
             logger.error("Error evaluating code", e);
+            if (e instanceof ToolExecutionException) throw (ToolExecutionException) e; // Avoid re-wrapping
             throw new ToolExecutionException("Code evaluation failed: " + e.getMessage(), e);
         }
     }
 
     private EvaluationResult executeCode(ScriptEngine engine, String code, Map<String, Object> variables,
                                          boolean captureOutput, int timeoutSeconds) throws ToolExecutionException {
-
+        // Note: The timeout logic remains a post-execution check.
+        // True pre-emptive timeout for engine.eval() is complex and platform-dependent.
         long startTime = System.currentTimeMillis();
         StringWriter outputWriter = new StringWriter();
         StringWriter errorWriter = new StringWriter();
@@ -165,8 +206,8 @@ public class REPLEvaluationTool implements McpTool {
             long executionTime = endTime - startTime;
 
             // Check timeout
-            if (executionTime > timeoutSeconds * 1000) {
-                throw new ToolExecutionException("Code execution timed out");
+            if (executionTime > timeoutSeconds * 1000L) { // Ensure long comparison
+                throw new ToolExecutionException("Code execution timed out after " + timeoutSeconds + " seconds.");
             }
 
             String output = outputWriter.toString();
@@ -176,6 +217,10 @@ public class REPLEvaluationTool implements McpTool {
             if (output.length() > MAX_OUTPUT_LENGTH) {
                 output = output.substring(0, MAX_OUTPUT_LENGTH) + "\n... (output truncated)";
             }
+            if (errorOutput.length() > MAX_OUTPUT_LENGTH) {
+                errorOutput = errorOutput.substring(0, MAX_OUTPUT_LENGTH) + "\n... (error output truncated)";
+            }
+
 
             return new EvaluationResult(
                     evalResult,
@@ -188,17 +233,24 @@ public class REPLEvaluationTool implements McpTool {
 
         } catch (ScriptException e) {
             long endTime = System.currentTimeMillis();
+            // It's important to capture the error output even in case of ScriptException
+            String currentOutput = outputWriter.toString();
+            String currentErrorOutput = errorWriter.toString();
+            if (currentErrorOutput.isEmpty()) { // If error writer is empty, use exception message
+                currentErrorOutput = e.getMessage();
+            }
             return new EvaluationResult(
                     null,
-                    outputWriter.toString(),
-                    errorWriter.toString(),
+                    currentOutput,
+                    currentErrorOutput,
                     endTime - startTime,
                     false,
-                    e.getMessage()
+                    e.getMessage() // Keep original ScriptException message for clarity
             );
-        } catch (Exception e) {
+        } catch (Exception e) { // Catch other runtime exceptions from script execution or setup
             long endTime = System.currentTimeMillis();
-            throw new ToolExecutionException("Execution error: " + e.getMessage());
+            // This could be an unexpected error not from the script itself but the setup.
+            throw new ToolExecutionException("Execution error: " + e.getMessage(), e);
         }
     }
 
@@ -219,7 +271,7 @@ public class REPLEvaluationTool implements McpTool {
                     """);
             }
         } catch (ScriptException e) {
-            logger.debug("Could not setup helper functions: {}", e.getMessage());
+            logger.debug("Could not setup helper functions: {}", e.getMessage()); // Use inherited logger
         }
     }
 
@@ -262,8 +314,9 @@ public class REPLEvaluationTool implements McpTool {
         if (!result.errorOutput.trim().isEmpty() || !result.success) {
             response.append("❌ Errors:\n");
             response.append("─".repeat(30)).append("\n");
-            if (result.errorMessage != null) {
-                response.append("Error: ").append(result.errorMessage).append("\n");
+            if (result.errorMessage != null && !result.errorMessage.trim().isEmpty() && !result.errorOutput.contains(result.errorMessage)) {
+                 // Only append errorMessage if it's not already part of errorOutput (which it often is for ScriptException)
+                response.append("Error Message: ").append(result.errorMessage).append("\n");
             }
             if (!result.errorOutput.trim().isEmpty()) {
                 response.append(result.errorOutput).append("\n");
@@ -281,51 +334,20 @@ public class REPLEvaluationTool implements McpTool {
         } else if (result instanceof Number || result instanceof Boolean) {
             return result.toString();
         } else if (result.getClass().isArray()) {
-            return java.util.Arrays.toString((Object[]) result);
+            // This needs more robust array formatting depending on array type
+            if (result instanceof Object[]) return java.util.Arrays.toString((Object[]) result);
+            if (result instanceof int[]) return java.util.Arrays.toString((int[]) result);
+            if (result instanceof long[]) return java.util.Arrays.toString((long[]) result);
+            if (result instanceof double[]) return java.util.Arrays.toString((double[]) result);
+            if (result instanceof boolean[]) return java.util.Arrays.toString((boolean[]) result);
+            // Add other primitive array types if necessary
+            return result.toString();
         } else {
             return result.toString();
         }
     }
 
-    private String getRequiredString(Map<String, Object> arguments, String key) throws ToolExecutionException {
-        Object value = arguments.get(key);
-        if (value == null || String.valueOf(value).trim().isEmpty()) {
-            throw new ToolExecutionException("Missing required parameter: " + key);
-        }
-        return String.valueOf(value);
-    }
-
-    private String getOptionalString(Map<String, Object> arguments, String key, String defaultValue) {
-        Object value = arguments.get(key);
-        return value != null ? String.valueOf(value) : defaultValue;
-    }
-
-    private int getOptionalInt(Map<String, Object> arguments, String key, int defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Number) return ((Number) value).intValue();
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
-    private boolean getOptionalBoolean(Map<String, Object> arguments, String key, boolean defaultValue) {
-        Object value = arguments.get(key);
-        if (value == null) return defaultValue;
-        if (value instanceof Boolean) return (Boolean) value;
-        return Boolean.parseBoolean(String.valueOf(value));
-    }
-
-    private McpModels.CallToolResponse.CallToolResult createTextResult(String text) {
-        McpModels.CallToolResponse.CallToolResult result = new McpModels.CallToolResponse.CallToolResult();
-        McpModels.Content content = new McpModels.Content();
-        content.type = "text";
-        content.text = text;
-        result.content = List.of(content);
-        return result;
-    }
+    // Helper methods (getRequiredString, etc.) are inherited from BaseMcpTool.
 
     /**
      * Result of code evaluation

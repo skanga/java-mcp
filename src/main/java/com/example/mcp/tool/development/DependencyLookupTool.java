@@ -2,11 +2,13 @@ package com.example.mcp.tool.development;
 
 import com.example.mcp.exception.ToolExecutionException;
 import com.example.mcp.model.McpModels;
-import com.example.mcp.tool.McpTool;
+import com.example.mcp.resource.ResourceLimiter; // Added
+import com.example.mcp.security.SecurityContext; // Added
+import com.example.mcp.tool.BaseMcpTool; // Added
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+// import org.slf4j.Logger; // To be removed
+// import org.slf4j.LoggerFactory; // To be removed
 
 import java.io.IOException;
 import java.net.URI;
@@ -19,15 +21,20 @@ import java.util.*;
 /**
  * Dependency Lookup Tool - Search and retrieve information about Maven/Gradle dependencies
  */
-public class DependencyLookupTool implements McpTool {
-    private static final Logger logger = LoggerFactory.getLogger(DependencyLookupTool.class);
-    private static final ObjectMapper objectMapper = new ObjectMapper();
-    private static final HttpClient httpClient = HttpClient.newBuilder()
+public class DependencyLookupTool extends BaseMcpTool { // Changed to extend BaseMcpTool
+    // private static final Logger logger = LoggerFactory.getLogger(DependencyLookupTool.class); // Logger inherited
+    private static final ObjectMapper objectMapper = new ObjectMapper(); // Remains static
+    private static final HttpClient httpClient = HttpClient.newBuilder() // Remains static
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
     // Repository APIs
     private static final String MAVEN_CENTRAL_SEARCH = "https://search.maven.org/solrsearch/select";
+
+    // Constructor added
+    public DependencyLookupTool(SecurityContext securityContext, ResourceLimiter resourceLimiter) {
+        super(securityContext, resourceLimiter);
+    }
 
     @Override
     public String getName() {
@@ -79,47 +86,100 @@ public class DependencyLookupTool implements McpTool {
                                 "default", false
                         )
                 ),
-                "required", List.of("operation", "query")
+                "required", List.of("operation") // Query is not always required if group/artifact provided
         );
     }
 
     @Override
-    public McpModels.CallToolResponse.CallToolResult execute(Map<String, Object> arguments) throws ToolExecutionException {
+    protected void validateInputs(Map<String, Object> arguments) throws ToolExecutionException {
+        String operation = getRequiredString(arguments, "operation");
+        List<String> validOperations = List.of("search", "latest_version", "artifact_info", "versions");
+        if (!validOperations.contains(operation)) {
+            throw new ToolExecutionException("Invalid operation: " + operation + ". Must be one of " + validOperations);
+        }
+
+        String query = getOptionalString(arguments, "query", null);
+        String groupId = getOptionalString(arguments, "group_id", null);
+        String artifactId = getOptionalString(arguments, "artifact_id", null);
+
+        if (query == null && (groupId == null || artifactId == null) && operation.equals("search")) {
+             throw new ToolExecutionException("Parameter 'query' or both 'group_id' and 'artifact_id' are required for 'search' operation.");
+        }
+        
+        // For operations other than 'search', group_id and artifact_id are typically essential.
+        if (operation.equals("latest_version") || operation.equals("artifact_info") || operation.equals("versions")) {
+            // If query is provided and seems to be in group:artifact format, it might be parsed later.
+            // But if not, and group_id or artifact_id are missing, it's an error.
+            boolean queryIsParsable = (query != null && (query.contains(":") || query.contains("/")));
+            if (!queryIsParsable && (groupId == null || artifactId == null)) {
+                 throw new ToolExecutionException("Both 'group_id' and 'artifact_id' (or a parsable 'query') are required for '" + operation + "' operation.");
+            }
+        }
+        // URL validation for MAVEN_CENTRAL_SEARCH could be added here if it were configurable
+        // securityContext.validateUrl(MAVEN_CENTRAL_SEARCH, true); // Example
+    }
+
+    @Override
+    protected ResourceLimiter.ResourcePermit acquireResources() throws ToolExecutionException {
+        // Using a conceptual network operation type.
+        // If this specific type doesn't exist in ResourceLimiter, adjust to an existing appropriate one.
+        return resourceLimiter.acquireNetworkOperation("maven_central_search");
+    }
+
+    // Renamed execute to executeInternal
+    @Override
+    protected McpModels.CallToolResponse.CallToolResult executeInternal(Map<String, Object> arguments) throws ToolExecutionException {
         try {
-            String operation = getRequiredString(arguments, "operation");
-            String query = getRequiredString(arguments, "query");
+            String operation = getRequiredString(arguments, "operation"); // Use inherited
+            String query = getOptionalString(arguments, "query", null); // Query is not always required
             String groupId = getOptionalString(arguments, "group_id", null);
             String artifactId = getOptionalString(arguments, "artifact_id", null);
             String version = getOptionalString(arguments, "version", null);
             int limit = getOptionalInt(arguments, "limit", 10);
             boolean includeSnapshots = getOptionalBoolean(arguments, "include_snapshots", false);
 
-            // Parse query if it contains group:artifact format
-            if (groupId == null && artifactId == null) {
+            // If query is provided but group/artifact are not, try to parse from query.
+            // This logic is retained from original, but now query itself can be null if group/artifact are directly provided.
+            if (query != null && (groupId == null || artifactId == null)) {
                 String[] parts = parseArtifactQuery(query);
                 if (parts.length >= 2) {
-                    groupId = parts[0];
+                    groupId = parts[0]; // This might overwrite a partially provided groupId/artifactId
                     artifactId = parts[1];
+                } else if (groupId == null && artifactId == null && operation.equals("search")) {
+                    // If query is not parsable and we don't have G/A for search, this is an issue.
+                    // But validateInputs should have caught the most egregious cases.
+                    // For search, query itself (unparsed) can be used if G/A are missing.
                 }
             }
+             // Re-check for operations that absolutely need groupId and artifactId after potential parsing
+            if ((operation.equals("latest_version") || operation.equals("artifact_info") || operation.equals("versions")) &&
+                (groupId == null || artifactId == null)) {
+                throw new ToolExecutionException("Both 'group_id' and 'artifact_id' must be resolved for operation '" + operation + "'.");
+            }
+
 
             // Execute operation
             DependencyResult result = switch (operation) {
-                case "search" -> searchDependencies(query, limit, includeSnapshots);
+                case "search" -> searchDependencies(query != null ? query : (groupId + ":" + artifactId), limit, includeSnapshots); // Use query if available, else construct from G:A
                 case "latest_version" -> getLatestVersion(groupId, artifactId, includeSnapshots);
                 case "artifact_info" -> getArtifactInfo(groupId, artifactId, version);
                 case "versions" -> getVersions(groupId, artifactId, limit, includeSnapshots);
-                default -> throw new ToolExecutionException("Unknown operation: " + operation);
+                default -> throw new ToolExecutionException("Unknown operation: " + operation); // Should be caught by validateInputs
             };
 
             // Format response
-            String response = formatDependencyResult(operation, result, query);
+            String response = formatDependencyResult(operation, result, query != null ? query : (groupId + ":" + artifactId));
 
-            logger.debug("Dependency lookup completed for operation: {} query: {}", operation, query);
-            return createTextResult(response);
+            logger.debug("Dependency lookup completed for operation: {} query: {}", operation, query); // Use inherited logger
+            return super.createTextResult(response); // Use inherited createTextResult
 
-        } catch (Exception e) {
+        } catch (IOException | InterruptedException e) { // More specific catch
+            logger.error("Network or interruption error performing dependency lookup", e);
+            throw new ToolExecutionException("Dependency lookup network/interruption failed: " + e.getMessage(), e);
+        } catch (Exception e) { // General catch
             logger.error("Error performing dependency lookup", e);
+            // Avoid re-wrapping ToolExecutionException
+            if (e instanceof ToolExecutionException) throw (ToolExecutionException) e;
             throw new ToolExecutionException("Dependency lookup failed: " + e.getMessage(), e);
         }
     }

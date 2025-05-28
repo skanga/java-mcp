@@ -6,14 +6,13 @@ import com.example.mcp.security.SecurityContext;
 import com.example.mcp.tool.McpTool;
 import com.example.mcp.tool.filesystem.*;
 import com.example.mcp.tool.system.*;
-import com.example.mcp.tool.development.GitOperationsTool; // Added import for GitOperationsTool
-// Removed import for SecureGitOperationsTool as it's replaced by GitOperationsTool
-import com.example.mcp.tool.development.ProjectAnalysisTool; // Ensuring ProjectAnalysisTool is imported
-// SecureProjectAnalysisTool import is now definitely removed.
-import com.example.mcp.tool.development.SecureCodeCritiqueTool;
-// Removed import for SecureCodeCritiqueTool as it's replaced by CodeCritiqueTool
-import com.example.mcp.tool.development.SecureDependencyLookupTool;
-import com.example.mcp.tool.development.SecureREPLEvaluationTool;
+import com.example.mcp.tool.development.GitOperationsTool;
+import com.example.mcp.tool.development.ProjectAnalysisTool;
+import com.example.mcp.tool.development.CodeCritiqueTool; // Corrected import
+import com.example.mcp.tool.development.DependencyLookupTool;
+import com.example.mcp.tool.development.REPLEvaluationTool;
+import com.example.mcp.tool.builtin.CurrentTimeTool;
+import com.example.mcp.tool.builtin.EchoTool; // Added import for EchoTool
 import com.example.mcp.config.ToolConfiguration;
 
 import java.util.HashMap;
@@ -50,9 +49,15 @@ public class ToolFactory {
      */
     public Set<String> getAvailableTools() {
         return Set.of(
+                // Filesystem tools
                 "read_file", "write_file_secure", "search_files", "directory_tree",
-                "execute_command", "git_operations", "analyze_project",
-                "code_critique", "dependency_lookup", "eval_code"
+                // System tools
+                "execute_command",
+                // Development tools
+                "git_operations", "analyze_project",
+                "code_critique", "dependency_lookup", "eval_code",
+                // Built-in tools
+                "current_time", "echo"
         );
     }
 
@@ -79,11 +84,15 @@ public class ToolFactory {
             case "execute_command" -> new ProcessExecutorTool(securityContext, resourceLimiter);
 
             // Development tools (these would need to be updated to extend BaseMcpTool)
-            case "git_operations" -> new GitOperationsTool(securityContext, resourceLimiter); // Changed to simple name GitOperationsTool
-            case "analyze_project" -> new ProjectAnalysisTool(securityContext, resourceLimiter); // Changed to simple name ProjectAnalysisTool
-            case "code_critique" -> new CodeCritiqueTool(securityContext, resourceLimiter); // Changed to simple name CodeCritiqueTool
-            case "dependency_lookup" -> new SecureDependencyLookupTool(securityContext, resourceLimiter);
-            case "eval_code" -> new SecureREPLEvaluationTool(securityContext, resourceLimiter);
+            case "git_operations" -> new GitOperationsTool(securityContext, resourceLimiter);
+            case "analyze_project" -> new ProjectAnalysisTool(securityContext, resourceLimiter);
+            case "code_critique" -> new CodeCritiqueTool(securityContext, resourceLimiter);
+            case "dependency_lookup" -> new DependencyLookupTool(securityContext, resourceLimiter);
+            case "eval_code" -> new REPLEvaluationTool(securityContext, resourceLimiter);
+
+            // Built-in tools
+            case "current_time" -> new CurrentTimeTool(securityContext, resourceLimiter);
+            case "echo" -> new EchoTool(securityContext, resourceLimiter);
 
             default -> throw new IllegalArgumentException("Unknown tool: " + toolName);
         };
